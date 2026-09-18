@@ -1,6 +1,8 @@
 """
-Chartink V-shape / Inverted-V RSI scanner -> Telegram alert
-Runs once per execution (scheduled via GitHub Actions cron).
+Chartink 4-table V-shape RSI scanner -> Telegram alert
+Reuses the exact base conditions from the user's own dashboard tables,
+plus the V-turn / inverted-V-turn confirmation from their own
+"PYRAMID" scans (dip-then-turn-up / rise-then-turn-down on RSI).
 """
 
 import os
@@ -13,35 +15,55 @@ CHARTINK_DASHBOARD_URL = "https://chartink.com/dashboard/433470"
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-# ---- EDIT THESE conditions to match your 4 tables' underlying scans ----
-# Chartink history syntax: ( latest rsi(14) ) means today's value.
-# ( 1 rsi(14) ) means value 1 bar ago (their "days ago" shorthand), NOT "1 candle ago rsi(14)".
-# Buy = V-shape bounce: RSI fell for 2 bars then turned up, inside the 40-60 zone
-BUY_CONDITION = """
-( {cash} ( 1 day ago rsi(14) < 2 days ago rsi(14) )
-and ( latest rsi(14) > 1 day ago rsi(14) )
-and ( 1 day ago rsi(14) >= 40 and 1 day ago rsi(14) <= 60 )
-and ( latest close > 1 day ago close ) )
-"""
+# V-turn confirmation add-ons (reused verbatim from the user's own
+# "-1D | M60 | W50 & BULLISH/BEARISH PYRAMID" scans)
+V_UP = "and 1 day ago rsi( 14 ) > 2 days ago rsi( 14 ) and 2 days ago rsi( 14 ) < 3 days ago rsi( 14 )"
+V_DOWN = "and 1 day ago rsi( 14 ) < 2 days ago rsi( 14 ) and 2 days ago rsi( 14 ) > 3 days ago rsi( 14 )"
 
-# Sell = Inverted-V: RSI rose for 2 bars then turned down, inside the 40-60 zone
-SELL_CONDITION = """
-( {cash} ( 1 day ago rsi(14) > 2 days ago rsi(14) )
-and ( latest rsi(14) < 1 day ago rsi(14) )
-and ( 1 day ago rsi(14) >= 40 and 1 day ago rsi(14) <= 60 )
-and ( latest close < 1 day ago close ) )
-"""
+SCANS = {
+    "NSE BUY": f"""
+        ( {{33489}} (
+            monthly rsi( 14 ) > 60 and
+            weekly rsi( 14 ) > 60 and
+            daily rsi( 14 ) > 1 day ago rsi( 14 )
+            {V_UP}
+        ) )
+    """,
+    "NSE SELL": f"""
+        ( {{33489}} (
+            monthly rsi( 14 ) < 40 and
+            weekly rsi( 14 ) < 40 and
+            daily rsi( 14 ) < 1 day ago rsi( 14 )
+            {V_DOWN}
+        ) )
+    """,
+    "BSE BUY": f"""
+        ( {{cash}} (
+            monthly rsi( 14 ) > 60 and
+            weekly rsi( 14 ) > 60 and
+            daily rsi( 14 ) > 1 day ago rsi( 14 )
+            {V_UP}
+        ) )
+    """,
+    "BSE SELL": f"""
+        ( {{cash}} (
+            monthly rsi( 14 ) < 40 and
+            weekly rsi( 14 ) < 40 and
+            daily rsi( 14 ) < 1 day ago rsi( 14 )
+            {V_DOWN}
+        ) )
+    """,
+}
 
 
-def get_csrf_and_session():
+def get_session():
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0"})
     r = s.get(CHARTINK_DASHBOARD_URL)
     m = re.search(r'name="csrf-token" content="(.+?)"', r.text)
     if not m:
         raise RuntimeError("Could not find csrf token - chartink page structure may have changed")
-    token = m.group(1)
-    s.headers.update({"x-csrf-token": token})
+    s.headers.update({"x-csrf-token": m.group(1)})
     return s
 
 
@@ -52,11 +74,10 @@ def run_scan(session, condition):
     return [row["nsecode"] for row in data.get("data", [])]
 
 
-TELEGRAM_LIMIT = 4000  # stay under Telegram's 4096 char hard cap
+TELEGRAM_LIMIT = 4000
 
 
 def send_telegram(message):
-    """Split into chunks so long lists don't get silently rejected."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     chunks = [message[i:i + TELEGRAM_LIMIT] for i in range(0, len(message), TELEGRAM_LIMIT)] or [message]
     for chunk in chunks:
@@ -69,32 +90,21 @@ def send_telegram(message):
 
 
 def main():
-    session = get_csrf_and_session()
+    session = get_session()
+    results = {}
 
-    try:
-        buys = run_scan(session, BUY_CONDITION)
-    except Exception as e:
-        buys = []
-        print("Buy scan failed:", e)
+    for name, clause in SCANS.items():
+        try:
+            results[name] = run_scan(session, clause)
+        except Exception as e:
+            results[name] = []
+            print(f"{name} scan failed:", e)
 
-    try:
-        sells = run_scan(session, SELL_CONDITION)
-    except Exception as e:
-        sells = []
-        print("Sell scan failed:", e)
-
-    MAX_SHOW = 60  # safety cap - if a condition is too loose this stops giant messages
-
-    lines = ["*Morning V-Shape Scan*"]
-    lines.append(f"\n*BUY (V-shape bounce)* [{len(buys)} found]:")
-    lines.append(", ".join(buys[:MAX_SHOW]) if buys else "None today")
-    if len(buys) > MAX_SHOW:
-        lines.append(f"...and {len(buys) - MAX_SHOW} more (tighten BUY_CONDITION)")
-
-    lines.append(f"\n*SELL (Inverted-V)* [{len(sells)} found]:")
-    lines.append(", ".join(sells[:MAX_SHOW]) if sells else "None today")
-    if len(sells) > MAX_SHOW:
-        lines.append(f"...and {len(sells) - MAX_SHOW} more (tighten SELL_CONDITION)")
+    lines = ["*Morning V-Shape Scan (AT 03:15PM style)*"]
+    for name, stocks in results.items():
+        emoji = "\U0001F7E2" if "BUY" in name else "\U0001F534"
+        lines.append(f"\n{emoji} *{name}* [{len(stocks)} found]:")
+        lines.append(", ".join(stocks) if stocks else "None today")
 
     message = "\n".join(lines)
     print(message)
