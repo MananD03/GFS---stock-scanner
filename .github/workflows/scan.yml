@@ -1,9 +1,9 @@
-name: Morning V-Shape Scanner
+name: V-Shape Squeeze Scanner
 
 on:
   schedule:
-    # 9:16 AM IST = 3:46 AM UTC. Runs Mon-Fri only.
-    - cron: "46 3 * * 1-5"
+    # 2:45 PM IST = 9:15 AM UTC. Runs Mon-Fri only. github is often 5-20 min late so it lands roughly 2:45-3:05
+    - cron: "15 9 * * 1-5"
   workflow_dispatch: {}   # lets you trigger manually to test
 
 jobs:
@@ -17,10 +17,12 @@ jobs:
           python-version: "3.11"
 
       - name: Install deps
-        run: pip install requests
+        run: pip install requests pandas numpy pyotp growwapi
 
       - name: Run scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GROWW_TOTP_TOKEN: ${{ secrets.GROWW_TOTP_TOKEN }}
+          GROWW_TOTP_SECRET: ${{ secrets.GROWW_TOTP_SECRET }}
         run: python scan.py
